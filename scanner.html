@@ -3,17 +3,19 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>BarcodeDetector Scanner</title>
+  <title>Barcode Scanner</title>
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 16px; max-width: 720px; margin: 0 auto; }
     video { width: 100%; border-radius: 12px; background: #111; }
-    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-    button { padding: 10px 12px; border-radius: 10px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+    button, input { padding: 10px 12px; border-radius: 10px; border: 1px solid #ccc; background: #fff; font-size: 16px; }
+    button { cursor: pointer; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     code { background: #f4f4f4; padding: 2px 6px; border-radius: 6px; }
     .status { margin-top: 12px; }
     .result { margin-top: 12px; font-size: 18px; }
-    .hint { color: #444; font-size: 14px; margin-top: 10px; }
+    .hint { color: #444; font-size: 14px; margin-top: 10px; line-height: 1.35; }
+    .small { font-size: 14px; color: #333; }
   </style>
 </head>
 <body>
@@ -36,11 +38,17 @@
   <div class="row">
     <button id="copyBtn" disabled>Copy</button>
     <button id="offBtn" disabled>Open Open Food Facts</button>
+    <button id="apiBtn" disabled>Open OFF API result</button>
     <button id="resetBtn" disabled>Reset</button>
   </div>
 
+  <div class="row">
+    <input id="manual" inputmode="numeric" pattern="[0-9]*" placeholder="Or type barcode digits" style="flex:1; min-width: 240px;" />
+    <button id="useManualBtn">Use typed code</button>
+  </div>
+
   <div class="hint">
-    Tips: fill the barcode in the frame, avoid glare, hold steady for a second.
+    Tips: fill the barcode in the frame, avoid glare, and hold steady for a second. If it struggles, back up slightly so the full barcode fits, then move closer.
     Works only on HTTPS and only in some browsers.
   </div>
 
@@ -56,21 +64,46 @@
   const codeEl = document.getElementById("code");
   const copyBtn = document.getElementById("copyBtn");
   const offBtn = document.getElementById("offBtn");
+  const apiBtn = document.getElementById("apiBtn");
   const resetBtn = document.getElementById("resetBtn");
+
+  const manual = document.getElementById("manual");
+  const useManualBtn = document.getElementById("useManualBtn");
 
   let stream = null;
   let detector = null;
-  let rafId = null;
+  let timerId = null;
   let lastCode = null;
 
+  const AUTO_COPY_ON_DETECT = true;
+  const SCAN_INTERVAL_MS = 220; // throttle detect calls
+
   function setStatus(msg) { statusEl.textContent = msg; }
+
+  function normalizeDigits(s) {
+    if (!s) return "";
+    return String(s).replace(/\D+/g, "");
+  }
 
   function setFound(code) {
     lastCode = code;
     codeEl.textContent = code;
     copyBtn.disabled = false;
     offBtn.disabled = false;
+    apiBtn.disabled = false;
     resetBtn.disabled = false;
+
+    // small success feedback (Android typically supports)
+    if (navigator.vibrate) navigator.vibrate(80);
+
+    if (AUTO_COPY_ON_DETECT) {
+      navigator.clipboard?.writeText(code).then(
+        () => setStatus("Found barcode and copied."),
+        () => setStatus("Found barcode.")
+      );
+    } else {
+      setStatus("Found barcode.");
+    }
   }
 
   function clearFound() {
@@ -78,29 +111,36 @@
     codeEl.textContent = "none";
     copyBtn.disabled = true;
     offBtn.disabled = true;
+    apiBtn.disabled = true;
     resetBtn.disabled = true;
   }
 
   function stopLoop() {
-    if (rafId) cancelAnimationFrame(rafId);
-    rafId = null;
+    if (timerId) clearInterval(timerId);
+    timerId = null;
   }
 
   async function startCamera() {
     clearFound();
 
+    if (!window.isSecureContext) {
+      setStatus("This page must be served over HTTPS for camera and BarcodeDetector.");
+      return;
+    }
     if (!("BarcodeDetector" in window)) {
-      setStatus("BarcodeDetector not supported in this browser.");
+      setStatus("BarcodeDetector not supported in this browser. Try Chrome or Edge on Android.");
       return;
     }
 
-    const formats = await BarcodeDetector.getSupportedFormats();
-    const preferred = ["ean_13", "ean_8", "upc_a", "upc_e"];
-    const chosen = preferred.filter(f => formats.includes(f));
-    if (!chosen.length) {
-      setStatus("BarcodeDetector supported, but UPC/EAN formats are not available here.");
-      return;
+    let formats = [];
+    try {
+      formats = await BarcodeDetector.getSupportedFormats();
+    } catch {
+      // some browsers throw even if supported
     }
+
+    const preferred = ["ean_13", "ean_8", "upc_a", "upc_e"];
+    const chosen = formats?.length ? preferred.filter(f => formats.includes(f)) : preferred;
 
     detector = new BarcodeDetector({ formats: chosen });
 
@@ -126,8 +166,8 @@
 
     setStatus("Scanning...");
 
-    updateTorchButtonState();
-    scanLoop();
+    await updateTorchButtonState();
+    startLoop();
   }
 
   function stopCamera() {
@@ -137,6 +177,7 @@
       stream.getTracks().forEach(t => t.stop());
       stream = null;
     }
+    detector = null;
     startBtn.disabled = false;
     stopBtn.disabled = true;
     torchBtn.disabled = true;
@@ -144,28 +185,31 @@
   }
 
   async function scanOnce() {
-    if (!detector || !video || video.readyState < 2) return;
+    if (!detector || !video || video.readyState < 2 || lastCode) return;
 
     try {
       const barcodes = await detector.detect(video);
       if (barcodes && barcodes.length) {
-        const value = barcodes[0].rawValue;
-        if (value && value !== lastCode) {
+        // pick the longest digit-only candidate (helps when multiple are returned)
+        const candidates = barcodes
+          .map(b => normalizeDigits(b.rawValue))
+          .filter(Boolean)
+          .sort((a,b) => b.length - a.length);
+
+        if (candidates.length) {
+          const value = candidates[0];
           setFound(value);
-          setStatus("Found barcode.");
           stopLoop();
         }
       }
-    } catch (e) {
+    } catch {
       // ignore intermittent detect errors
     }
   }
 
-  function scanLoop() {
-    rafId = requestAnimationFrame(async () => {
-      await scanOnce();
-      if (!lastCode) scanLoop();
-    });
+  function startLoop() {
+    stopLoop();
+    timerId = setInterval(scanOnce, SCAN_INTERVAL_MS);
   }
 
   async function updateTorchButtonState() {
@@ -194,9 +238,24 @@
 
     try {
       await track.applyConstraints({ advanced: [{ torch: !torchOn }] });
-    } catch (e) {
-      // Some devices reject torch constraints
+    } catch {
+      setStatus("Torch not available on this device.");
     }
+  }
+
+  function openOFFProduct(code) {
+    const c = normalizeDigits(code);
+    if (!c) return;
+
+    // Same-tab navigation works more reliably on mobile than window.open
+    window.location.href = "https://world.openfoodfacts.org/product/" + encodeURIComponent(c);
+  }
+
+  function openOFFApi(code) {
+    const c = normalizeDigits(code);
+    if (!c) return;
+
+    window.location.href = "https://world.openfoodfacts.org/api/v2/product/" + encodeURIComponent(c) + ".json";
   }
 
   startBtn.addEventListener("click", startCamera);
@@ -215,23 +274,37 @@
 
   offBtn.addEventListener("click", () => {
     if (!lastCode) return;
-    const url = "https://world.openfoodfacts.org/product/" + encodeURIComponent(lastCode);
-    window.open(url, "_blank", "noopener,noreferrer");
+    openOFFProduct(lastCode);
+  });
+
+  apiBtn.addEventListener("click", () => {
+    if (!lastCode) return;
+    openOFFApi(lastCode);
   });
 
   resetBtn.addEventListener("click", () => {
     clearFound();
     setStatus("Scanning...");
-    scanLoop();
+    startLoop();
   });
 
-  // Initial support check
+  useManualBtn.addEventListener("click", () => {
+    const typed = normalizeDigits(manual.value);
+    if (!typed) {
+      setStatus("Type digits first.");
+      return;
+    }
+    setFound(typed);
+    stopLoop();
+  });
+
+  // Initial message
   if (!window.isSecureContext) {
     setStatus("This page must be served over HTTPS for camera and BarcodeDetector.");
     return;
   }
   if (!("BarcodeDetector" in window)) {
-    setStatus("BarcodeDetector not available. Try Chrome or Edge on Android, or check browser support.");
+    setStatus("BarcodeDetector not available. Try Chrome or Edge on Android.");
     return;
   }
   setStatus("Ready. Click Start camera.");
