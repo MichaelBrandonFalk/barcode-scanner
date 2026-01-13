@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BarcodeDetector Scanner</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 16px; max-width: 720px; margin: 0 auto; }
+    video { width: 100%; border-radius: 12px; background: #111; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    button { padding: 10px 12px; border-radius: 10px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    code { background: #f4f4f4; padding: 2px 6px; border-radius: 6px; }
+    .status { margin-top: 12px; }
+    .result { margin-top: 12px; font-size: 18px; }
+    .hint { color: #444; font-size: 14px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>Scan a product barcode</h1>
+
+  <div class="status" id="status">Checking support...</div>
+
+  <video id="video" playsinline muted></video>
+
+  <div class="row">
+    <button id="startBtn">Start camera</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="torchBtn" disabled>Toggle torch</button>
+  </div>
+
+  <div class="result">
+    Barcode: <code id="code">none</code>
+  </div>
+
+  <div class="row">
+    <button id="copyBtn" disabled>Copy</button>
+    <button id="offBtn" disabled>Open Open Food Facts</button>
+    <button id="resetBtn" disabled>Reset</button>
+  </div>
+
+  <div class="hint">
+    Tips: fill the barcode in the frame, avoid glare, hold steady for a second.
+    Works only on HTTPS and only in some browsers. :contentReference[oaicite:1]{index=1}
+  </div>
+
+<script>
+(async () => {
+  const statusEl = document.getElementById("status");
+  const video = document.getElementById("video");
+
+  const startBtn = document.getElementById("startBtn");
+  const stopBtn = document.getElementById("stopBtn");
+  const torchBtn = document.getElementById("torchBtn");
+
+  const codeEl = document.getElementById("code");
+  const copyBtn = document.getElementById("copyBtn");
+  const offBtn = document.getElementById("offBtn");
+  const resetBtn = document.getElementById("resetBtn");
+
+  let stream = null;
+  let detector = null;
+  let rafId = null;
+  let lastCode = null;
+
+  function setStatus(msg) { statusEl.textContent = msg; }
+
+  function setFound(code) {
+    lastCode = code;
+    codeEl.textContent = code;
+    copyBtn.disabled = false;
+    offBtn.disabled = false;
+    resetBtn.disabled = false;
+  }
+
+  function clearFound() {
+    lastCode = null;
+    codeEl.textContent = "none";
+    copyBtn.disabled = true;
+    offBtn.disabled = true;
+    resetBtn.disabled = true;
+  }
+
+  function stopLoop() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+
+  async function startCamera() {
+    clearFound();
+
+    if (!("BarcodeDetector" in window)) {
+      setStatus("BarcodeDetector not supported in this browser.");
+      return;
+    }
+
+    const formats = await BarcodeDetector.getSupportedFormats();
+    const preferred = ["ean_13", "ean_8", "upc_a", "upc_e"];
+    const chosen = preferred.filter(f => formats.includes(f));
+    if (!chosen.length) {
+      setStatus("BarcodeDetector supported, but UPC/EAN formats are not available here.");
+      return;
+    }
+
+    detector = new BarcodeDetector({ formats: chosen });
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      });
+    } catch (e) {
+      setStatus("Camera permission denied or not available.");
+      return;
+    }
+
+    video.srcObject = stream;
+    await video.play();
+
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+
+    setStatus("Scanning...");
+
+    updateTorchButtonState();
+    scanLoop();
+  }
+
+  function stopCamera() {
+    stopLoop();
+    if (video) video.pause();
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    torchBtn.disabled = true;
+    setStatus("Stopped.");
+  }
+
+  async function scanOnce() {
+    if (!detector || !video || video.readyState < 2) return;
+
+    try {
+      const barcodes = await detector.detect(video);
+      if (barcodes && barcodes.length) {
+        const value = barcodes[0].rawValue;
+        if (value && value !== lastCode) {
+          setFound(value);
+          setStatus("Found barcode.");
+          stopLoop();
+        }
+      }
+    } catch (e) {
+      // ignore intermittent detect errors
+    }
+  }
+
+  function scanLoop() {
+    rafId = requestAnimationFrame(async () => {
+      await scanOnce();
+      if (!lastCode) scanLoop();
+    });
+  }
+
+  async function updateTorchButtonState() {
+    torchBtn.disabled = true;
+    if (!stream) return;
+
+    const track = stream.getVideoTracks()[0];
+    if (!track) return;
+
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (caps && "torch" in caps) {
+      torchBtn.disabled = false;
+    }
+  }
+
+  async function toggleTorch() {
+    if (!stream) return;
+    const track = stream.getVideoTracks()[0];
+    if (!track || !track.getCapabilities) return;
+
+    const caps = track.getCapabilities();
+    if (!caps || !("torch" in caps)) return;
+
+    const settings = track.getSettings ? track.getSettings() : {};
+    const torchOn = !!settings.torch;
+
+    try {
+      await track.applyConstraints({ advanced: [{ torch: !torchOn }] });
+    } catch (e) {
+      // Some devices reject torch constraints
+    }
+  }
+
+  startBtn.addEventListener("click", startCamera);
+  stopBtn.addEventListener("click", stopCamera);
+  torchBtn.addEventListener("click", toggleTorch);
+
+  copyBtn.addEventListener("click", async () => {
+    if (!lastCode) return;
+    try {
+      await navigator.clipboard.writeText(lastCode);
+      setStatus("Copied.");
+    } catch {
+      setStatus("Copy failed. Select and copy manually.");
+    }
+  });
+
+  offBtn.addEventListener("click", () => {
+    if (!lastCode) return;
+    const url = "https://world.openfoodfacts.org/product/" + encodeURIComponent(lastCode);
+    window.open(url, "_blank", "noopener,noreferrer");
+  });
+
+  resetBtn.addEventListener("click", () => {
+    clearFound();
+    setStatus("Scanning...");
+    scanLoop();
+  });
+
+  // Initial support check
+  if (!window.isSecureContext) {
+    setStatus("This page must be served over HTTPS for camera and BarcodeDetector.");
+    return;
+  }
+  if (!("BarcodeDetector" in window)) {
+    setStatus("BarcodeDetector not available. Try Chrome or Edge on Android, or check browser support.");
+    return;
+  }
+  setStatus("Ready. Click Start camera.");
+})();
+</script>
+</body>
+</html>
