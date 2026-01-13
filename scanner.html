@@ -37,6 +37,7 @@
 
   <div class="row">
     <button id="copyBtn" disabled>Copy</button>
+    <button id="gptBtn" disabled>Open my GPT</button>
     <button id="offBtn" disabled>Open Open Food Facts</button>
     <button id="apiBtn" disabled>Open OFF API result</button>
     <button id="resetBtn" disabled>Reset</button>
@@ -66,6 +67,7 @@
   const offBtn = document.getElementById("offBtn");
   const apiBtn = document.getElementById("apiBtn");
   const resetBtn = document.getElementById("resetBtn");
+  const gptBtn = document.getElementById("gptBtn");
 
   const manual = document.getElementById("manual");
   const useManualBtn = document.getElementById("useManualBtn");
@@ -76,6 +78,7 @@
   let lastCode = null;
 
   const AUTO_COPY_ON_DETECT = true;
+  const GPT_LINK = "https://chatgpt.com/g/g-69668ac831dc81918be724f6ba3eee8d-the-wonderful-chef";
   const SCAN_INTERVAL_MS = 220; // throttle detect calls
 
   function setStatus(msg) { statusEl.textContent = msg; }
@@ -92,6 +95,8 @@
     offBtn.disabled = false;
     apiBtn.disabled = false;
     resetBtn.disabled = false;
+    gptBtn.disabled = false;
+
 
     // small success feedback (Android typically supports)
     if (navigator.vibrate) navigator.vibrate(80);
@@ -113,6 +118,8 @@
     offBtn.disabled = true;
     apiBtn.disabled = true;
     resetBtn.disabled = true;
+    gptBtn.disabled = true;
+
   }
 
   function stopLoop() {
@@ -272,6 +279,29 @@
     }
   });
 
+  gptBtn.addEventListener("click", async () => {
+  if (!lastCode) return;
+
+  const digits = normalizeDigits(lastCode);
+  try {
+    await navigator.clipboard.writeText(digits);
+  } catch {
+    // if clipboard fails, user can still manually copy
+  }
+
+  if (!GPT_LINK || GPT_LINK.includes("PASTE_YOUR_CUSTOM_GPT_LINK_HERE")) {
+    setStatus("Add your GPT link in the code first.");
+    return;
+  }
+
+  // Open your GPT in a new tab
+  window.open(GPT_LINK, "_blank", "noopener,noreferrer");
+
+  setStatus("Opened your GPT. Paste the barcode there.");
+});
+
+
+  
   offBtn.addEventListener("click", () => {
     if (!lastCode) return;
     openOFFProduct(lastCode);
