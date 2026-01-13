@@ -6,150 +6,204 @@
   <title>Barcode Scanner</title>
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 16px; max-width: 720px; margin: 0 auto; }
-    video { width: 100%; border-radius: 12px; background: #111; }
-    .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
-    button, input { padding: 10px 12px; border-radius: 10px; border: 1px solid #ccc; background: #fff; font-size: 16px; }
-    button { cursor: pointer; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    code { background: #f4f4f4; padding: 2px 6px; border-radius: 6px; }
-    .status { margin-top: 12px; }
-    .result { margin-top: 12px; font-size: 18px; }
-    .hint { color: #444; font-size: 14px; margin-top: 10px; line-height: 1.35; }
-    .small { font-size: 14px; color: #333; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    .card { border: 1px solid #ddd; border-radius: 14px; padding: 12px; }
+    video, img, canvas { width: 100%; border-radius: 12px; background: #111; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+    button, input[type="file"] { font-size: 16px; }
+    button {
+      padding: 10px 12px; border-radius: 12px; border: 1px solid #ccc; background: #fff; cursor: pointer;
+    }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .status { margin-top: 10px; color: #111; }
+    .code { margin-top: 10px; font-size: 18px; }
+    code { background: #f4f4f4; padding: 2px 6px; border-radius: 8px; }
+    .hint { margin-top: 10px; color: #444; font-size: 14px; line-height: 1.35; }
+    .hidden { display: none; }
   </style>
 </head>
 <body>
-  <h1>Scan a product barcode</h1>
+  <h1>Scan a barcode</h1>
 
-  <div class="status" id="status">Checking support...</div>
+  <div class="card">
+    <div id="status" class="status">Checking support...</div>
 
-  <video id="video" playsinline muted></video>
+    <video id="video" class="hidden" playsinline muted></video>
+    <img id="preview" class="hidden" alt="Uploaded image preview" />
+    <canvas id="canvas" class="hidden"></canvas>
 
-  <div class="row">
-    <button id="startBtn">Start camera</button>
-    <button id="stopBtn" disabled>Stop</button>
-    <button id="torchBtn" disabled>Toggle torch</button>
-  </div>
+    <div class="row">
+      <button id="startBtn">Use camera</button>
+      <button id="stopBtn" class="hidden">Stop</button>
 
-  <div class="result">
-    Barcode: <code id="code">none</code>
-  </div>
+      <label style="display:inline-block;">
+        <input id="fileInput" type="file" accept="image/*" style="display:none;" />
+        <button id="uploadBtn" type="button">Upload photo</button>
+      </label>
+    </div>
 
-  <div class="row">
-    <button id="copyBtn" disabled>Copy</button>
-    <button id="gptBtn" disabled>Open my GPT</button>
-    <button id="offBtn" disabled>Open Open Food Facts</button>
-    <button id="apiBtn" disabled>Open OFF API result</button>
-    <button id="resetBtn" disabled>Reset</button>
-  </div>
+    <div class="code">
+      Barcode: <code id="code">none</code>
+    </div>
 
-  <div class="row">
-    <input id="manual" inputmode="numeric" pattern="[0-9]*" placeholder="Or type barcode digits" style="flex:1; min-width: 240px;" />
-    <button id="useManualBtn">Use typed code</button>
-  </div>
-
-  <div class="hint">
-    Tips: fill the barcode in the frame, avoid glare, and hold steady for a second. If it struggles, back up slightly so the full barcode fits, then move closer.
-    Works only on HTTPS and only in some browsers.
+    <div class="hint">
+      Tips: fill the frame with the barcode, avoid glare, hold steady. If camera scanning fails, try Upload photo.
+      Works best in Chrome or Edge on Android and requires HTTPS.
+    </div>
   </div>
 
 <script>
-(async () => {
+(() => {
+  // 1) Paste your Custom GPT link here
+  const GPT_LINK = "https://chatgpt.com/g/g-69668ac831dc81918be724f6ba3eee8d-the-wonderful-chef";
+
+  // Behavior
+  const AUTO_OPEN_GPT_AFTER_DETECT = true;
+  const OPEN_DELAY_MS = 250;
+
+  // Throttle scanning
+  const SCAN_INTERVAL_MS = 220;
+
   const statusEl = document.getElementById("status");
+  const codeEl = document.getElementById("code");
+
   const video = document.getElementById("video");
+  const preview = document.getElementById("preview");
+  const canvas = document.getElementById("canvas");
 
   const startBtn = document.getElementById("startBtn");
   const stopBtn = document.getElementById("stopBtn");
-  const torchBtn = document.getElementById("torchBtn");
+  const uploadBtn = document.getElementById("uploadBtn");
+  const fileInput = document.getElementById("fileInput");
 
-  const codeEl = document.getElementById("code");
-  const copyBtn = document.getElementById("copyBtn");
-  const offBtn = document.getElementById("offBtn");
-  const apiBtn = document.getElementById("apiBtn");
-  const resetBtn = document.getElementById("resetBtn");
-  const gptBtn = document.getElementById("gptBtn");
-
-  const manual = document.getElementById("manual");
-  const useManualBtn = document.getElementById("useManualBtn");
-
-  let stream = null;
   let detector = null;
+  let stream = null;
   let timerId = null;
   let lastCode = null;
-
-  const AUTO_COPY_ON_DETECT = true;
-  const GPT_LINK = "https://chatgpt.com/g/g-69668ac831dc81918be724f6ba3eee8d-the-wonderful-chef";
-  const SCAN_INTERVAL_MS = 220; // throttle detect calls
 
   function setStatus(msg) { statusEl.textContent = msg; }
 
   function normalizeDigits(s) {
-    if (!s) return "";
-    return String(s).replace(/\D+/g, "");
+    return String(s || "").replace(/\D+/g, "");
   }
 
-  function setFound(code) {
-    lastCode = code;
-    codeEl.textContent = code;
-    copyBtn.disabled = false;
-    offBtn.disabled = false;
-    apiBtn.disabled = false;
-    resetBtn.disabled = false;
-    gptBtn.disabled = false;
-
-
-    // small success feedback (Android typically supports)
-    if (navigator.vibrate) navigator.vibrate(80);
-
-    if (AUTO_COPY_ON_DETECT) {
-      navigator.clipboard?.writeText(code).then(
-        () => setStatus("Found barcode and copied."),
-        () => setStatus("Found barcode.")
-      );
-    } else {
-      setStatus("Found barcode.");
-    }
-  }
-
-  function clearFound() {
-    lastCode = null;
-    codeEl.textContent = "none";
-    copyBtn.disabled = true;
-    offBtn.disabled = true;
-    apiBtn.disabled = true;
-    resetBtn.disabled = true;
-    gptBtn.disabled = true;
-
-  }
+  function show(el) { el.classList.remove("hidden"); }
+  function hide(el) { el.classList.add("hidden"); }
 
   function stopLoop() {
     if (timerId) clearInterval(timerId);
     timerId = null;
   }
 
-  async function startCamera() {
-    clearFound();
+  function stopCamera() {
+    stopLoop();
+    if (video) video.pause();
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    hide(video);
+    hide(stopBtn);
+    setStatus("Stopped.");
+  }
 
+  async function ensureDetector() {
     if (!window.isSecureContext) {
-      setStatus("This page must be served over HTTPS for camera and BarcodeDetector.");
-      return;
+      setStatus("This page must be served over HTTPS.");
+      return null;
     }
     if (!("BarcodeDetector" in window)) {
       setStatus("BarcodeDetector not supported in this browser. Try Chrome or Edge on Android.");
+      return null;
+    }
+
+    // Try to select common retail formats
+    let formats = [];
+    try { formats = await BarcodeDetector.getSupportedFormats(); } catch {}
+
+    const preferred = ["ean_13", "ean_8", "upc_a", "upc_e"];
+    const chosen = formats && formats.length ? preferred.filter(f => formats.includes(f)) : preferred;
+
+    detector = new BarcodeDetector({ formats: chosen });
+    return detector;
+  }
+
+  async function copyToClipboard(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function openGpt() {
+    if (!AUTO_OPEN_GPT_AFTER_DETECT) return;
+
+    if (!GPT_LINK || GPT_LINK.includes("PASTE_YOUR_CUSTOM_GPT_LINK_HERE")) {
+      setStatus("Set GPT_LINK in the file first.");
       return;
     }
 
-    let formats = [];
-    try {
-      formats = await BarcodeDetector.getSupportedFormats();
-    } catch {
-      // some browsers throw even if supported
+    // Open in a new tab so user can come back if needed
+    window.open(GPT_LINK, "_blank", "noopener,noreferrer");
+  }
+
+  async function handleFound(rawValue) {
+    const digits = normalizeDigits(rawValue);
+    if (!digits) return;
+
+    lastCode = digits;
+    codeEl.textContent = digits;
+
+    if (navigator.vibrate) navigator.vibrate(80);
+
+    const copied = await copyToClipboard(digits);
+    if (copied) {
+      setStatus("Found and copied. Opening your GPT...");
+    } else {
+      setStatus("Found barcode. Copy may be blocked, long press the digits to copy. Opening your GPT...");
     }
 
-    const preferred = ["ean_13", "ean_8", "upc_a", "upc_e"];
-    const chosen = formats?.length ? preferred.filter(f => formats.includes(f)) : preferred;
+    stopLoop();
+    stopCamera();
 
-    detector = new BarcodeDetector({ formats: chosen });
+    setTimeout(openGpt, OPEN_DELAY_MS);
+  }
+
+  async function scanVideoFrame() {
+    if (!detector || !video || video.readyState < 2 || lastCode) return;
+
+    try {
+      const results = await detector.detect(video);
+      if (results && results.length) {
+        const candidates = results
+          .map(r => normalizeDigits(r.rawValue))
+          .filter(Boolean)
+          .sort((a, b) => b.length - a.length);
+
+        if (candidates.length) {
+          await handleFound(candidates[0]);
+        }
+      }
+    } catch {
+      // ignore intermittent errors
+    }
+  }
+
+  function startLoop() {
+    stopLoop();
+    timerId = setInterval(scanVideoFrame, SCAN_INTERVAL_MS);
+  }
+
+  async function startCamera() {
+    lastCode = null;
+    codeEl.textContent = "none";
+    hide(preview);
+    hide(canvas);
+
+    const d = await ensureDetector();
+    if (!d) return;
 
     try {
       stream = await navigator.mediaDevices.getUserMedia({
@@ -160,7 +214,7 @@
         },
         audio: false
       });
-    } catch (e) {
+    } catch {
       setStatus("Camera permission denied or not available.");
       return;
     }
@@ -168,176 +222,105 @@
     video.srcObject = stream;
     await video.play();
 
-    startBtn.disabled = true;
-    stopBtn.disabled = false;
+    show(video);
+    show(stopBtn);
 
-    setStatus("Scanning...");
-
-    await updateTorchButtonState();
+    setStatus("Scanning with camera...");
     startLoop();
   }
 
-  function stopCamera() {
-    stopLoop();
-    if (video) video.pause();
-    if (stream) {
-      stream.getTracks().forEach(t => t.stop());
-      stream = null;
-    }
-    detector = null;
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-    torchBtn.disabled = true;
-    setStatus("Stopped.");
-  }
+  async function scanUploadedImage(file) {
+    lastCode = null;
+    codeEl.textContent = "none";
+    stopCamera();
 
-  async function scanOnce() {
-    if (!detector || !video || video.readyState < 2 || lastCode) return;
+    const d = await ensureDetector();
+    if (!d) return;
+
+    const url = URL.createObjectURL(file);
+    preview.src = url;
+
+    await new Promise((resolve, reject) => {
+      preview.onload = () => resolve();
+      preview.onerror = () => reject(new Error("load failed"));
+    });
+
+    show(preview);
+    hide(video);
+    hide(canvas);
+
+    setStatus("Scanning uploaded photo...");
 
     try {
-      const barcodes = await detector.detect(video);
-      if (barcodes && barcodes.length) {
-        // pick the longest digit-only candidate (helps when multiple are returned)
-        const candidates = barcodes
-          .map(b => normalizeDigits(b.rawValue))
+      // Detect directly from the image element
+      const results = await detector.detect(preview);
+      if (results && results.length) {
+        const candidates = results
+          .map(r => normalizeDigits(r.rawValue))
           .filter(Boolean)
-          .sort((a,b) => b.length - a.length);
+          .sort((a, b) => b.length - a.length);
 
         if (candidates.length) {
-          const value = candidates[0];
-          setFound(value);
-          stopLoop();
+          await handleFound(candidates[0]);
+          URL.revokeObjectURL(url);
+          return;
         }
       }
+
+      // Fallback: draw to canvas and try again (helps on some devices)
+      const ctx = canvas.getContext("2d");
+      canvas.width = preview.naturalWidth || preview.width;
+      canvas.height = preview.naturalHeight || preview.height;
+      ctx.drawImage(preview, 0, 0, canvas.width, canvas.height);
+
+      show(canvas);
+      const results2 = await detector.detect(canvas);
+      if (results2 && results2.length) {
+        const candidates2 = results2
+          .map(r => normalizeDigits(r.rawValue))
+          .filter(Boolean)
+          .sort((a, b) => b.length - a.length);
+
+        if (candidates2.length) {
+          await handleFound(candidates2[0]);
+          URL.revokeObjectURL(url);
+          return;
+        }
+      }
+
+      setStatus("No barcode found. Try a clearer photo or use camera scan with less glare.");
+      URL.revokeObjectURL(url);
     } catch {
-      // ignore intermittent detect errors
+      setStatus("Could not scan that image. Try another photo or use camera scan.");
+      URL.revokeObjectURL(url);
     }
   }
 
-  function startLoop() {
-    stopLoop();
-    timerId = setInterval(scanOnce, SCAN_INTERVAL_MS);
-  }
-
-  async function updateTorchButtonState() {
-    torchBtn.disabled = true;
-    if (!stream) return;
-
-    const track = stream.getVideoTracks()[0];
-    if (!track) return;
-
-    const caps = track.getCapabilities ? track.getCapabilities() : {};
-    if (caps && "torch" in caps) {
-      torchBtn.disabled = false;
-    }
-  }
-
-  async function toggleTorch() {
-    if (!stream) return;
-    const track = stream.getVideoTracks()[0];
-    if (!track || !track.getCapabilities) return;
-
-    const caps = track.getCapabilities();
-    if (!caps || !("torch" in caps)) return;
-
-    const settings = track.getSettings ? track.getSettings() : {};
-    const torchOn = !!settings.torch;
-
-    try {
-      await track.applyConstraints({ advanced: [{ torch: !torchOn }] });
-    } catch {
-      setStatus("Torch not available on this device.");
-    }
-  }
-
-  function openOFFProduct(code) {
-    const c = normalizeDigits(code);
-    if (!c) return;
-
-    // Same-tab navigation works more reliably on mobile than window.open
-    window.location.href = "https://world.openfoodfacts.org/product/" + encodeURIComponent(c);
-  }
-
-  function openOFFApi(code) {
-    const c = normalizeDigits(code);
-    if (!c) return;
-
-    window.location.href = "https://world.openfoodfacts.org/api/v2/product/" + encodeURIComponent(c) + ".json";
-  }
-
+  // Event wiring
   startBtn.addEventListener("click", startCamera);
   stopBtn.addEventListener("click", stopCamera);
-  torchBtn.addEventListener("click", toggleTorch);
 
-  copyBtn.addEventListener("click", async () => {
-    if (!lastCode) return;
-    try {
-      await navigator.clipboard.writeText(lastCode);
-      setStatus("Copied.");
-    } catch {
-      setStatus("Copy failed. Select and copy manually.");
-    }
+  uploadBtn.addEventListener("click", () => fileInput.click());
+
+  fileInput.addEventListener("change", async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    await scanUploadedImage(file);
+    fileInput.value = "";
   });
 
-  gptBtn.addEventListener("click", async () => {
-  if (!lastCode) return;
-
-  const digits = normalizeDigits(lastCode);
-  try {
-    await navigator.clipboard.writeText(digits);
-  } catch {
-    // if clipboard fails, user can still manually copy
-  }
-
-  if (!GPT_LINK || GPT_LINK.includes("PASTE_YOUR_CUSTOM_GPT_LINK_HERE")) {
-    setStatus("Add your GPT link in the code first.");
-    return;
-  }
-
-  // Open your GPT in a new tab
-  window.open(GPT_LINK, "_blank", "noopener,noreferrer");
-
-  setStatus("Opened your GPT. Paste the barcode there.");
-});
-
-
-  
-  offBtn.addEventListener("click", () => {
-    if (!lastCode) return;
-    openOFFProduct(lastCode);
-  });
-
-  apiBtn.addEventListener("click", () => {
-    if (!lastCode) return;
-    openOFFApi(lastCode);
-  });
-
-  resetBtn.addEventListener("click", () => {
-    clearFound();
-    setStatus("Scanning...");
-    startLoop();
-  });
-
-  useManualBtn.addEventListener("click", () => {
-    const typed = normalizeDigits(manual.value);
-    if (!typed) {
-      setStatus("Type digits first.");
+  // Initial checks
+  (async () => {
+    if (!window.isSecureContext) {
+      setStatus("This page must be served over HTTPS.");
       return;
     }
-    setFound(typed);
-    stopLoop();
-  });
-
-  // Initial message
-  if (!window.isSecureContext) {
-    setStatus("This page must be served over HTTPS for camera and BarcodeDetector.");
-    return;
-  }
-  if (!("BarcodeDetector" in window)) {
-    setStatus("BarcodeDetector not available. Try Chrome or Edge on Android.");
-    return;
-  }
-  setStatus("Ready. Click Start camera.");
+    if (!("BarcodeDetector" in window)) {
+      setStatus("BarcodeDetector not supported here. Try Chrome or Edge on Android.");
+      return;
+    }
+    setStatus("Ready. Use camera or upload a photo.");
+  })();
 })();
 </script>
 </body>
