@@ -4,6 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Barcode Scanner</title>
+
+  <!-- OCR fallback (free, runs in the browser) -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 16px; max-width: 720px; margin: 0 auto; }
     h1 { font-size: 20px; margin: 0 0 12px; }
@@ -19,6 +23,7 @@
     .hidden { display: none; }
   </style>
 </head>
+
 <body>
   <h1>Scan a barcode</h1>
 
@@ -41,22 +46,18 @@
     </div>
 
     <div class="hint">
-      Tips: fill the frame with the barcode, avoid glare, hold steady.
-      If upload scan fails, crop the photo tighter around the barcode and try again.
-      Works best in Chrome or Edge on Android and requires HTTPS.
+      If upload scan fails, try cropping the photo tighter around the barcode and upload again.
+      Best results: barcode fills the frame, minimal glare, and the label is flat.
     </div>
   </div>
 
 <script>
 (() => {
-  // Your Custom GPT link
+  // Set this to your Custom GPT link (already in your repo, included here for completeness)
   const GPT_LINK = "https://chatgpt.com/g/g-69668ac831dc81918be724f6ba3eee8d-the-wonderful-chef";
 
-  // Behavior
   const AUTO_OPEN_GPT_AFTER_DETECT = true;
   const OPEN_DELAY_MS = 250;
-
-  // Camera scanning throttle
   const SCAN_INTERVAL_MS = 220;
 
   const statusEl = document.getElementById("status");
@@ -70,7 +71,7 @@
   const uploadBtn = document.getElementById("uploadBtn");
   const fileInput = document.getElementById("fileInput");
 
-  // Hidden work canvas (never shown)
+  // Hidden work canvas (never displayed)
   const workCanvas = document.createElement("canvas");
   const workCtx = workCanvas.getContext("2d", { willReadFrequently: true });
 
@@ -87,14 +88,14 @@
     return String(s || "").replace(/\D+/g, "");
   }
 
-  function stopLoop() {
-    if (timerId) clearInterval(timerId);
-    timerId = null;
-  }
-
   function resetResult() {
     lastCode = null;
     codeEl.textContent = "none";
+  }
+
+  function stopLoop() {
+    if (timerId) clearInterval(timerId);
+    timerId = null;
   }
 
   function stopCamera() {
@@ -118,7 +119,6 @@
       return null;
     }
 
-    // Prefer common retail formats
     let formats = [];
     try { formats = await BarcodeDetector.getSupportedFormats(); } catch {}
 
@@ -154,7 +154,8 @@
     if (navigator.vibrate) navigator.vibrate(80);
 
     const copied = await copyToClipboard(digits);
-    setStatus(copied ? "Found and copied. Opening your GPT..." : "Found barcode. Copy may be blocked. Opening your GPT...");
+    if (copied) setStatus("Found and copied. Opening your GPT...");
+    else setStatus("Found barcode. Copy may be blocked. Opening your GPT...");
 
     stopLoop();
     stopCamera();
@@ -179,23 +180,19 @@
   }
 
   function drawCrop(bitmap, sx, sy, sw, sh, outMaxSide) {
-    // scale crop so barcode lines have enough pixels
     const scale = outMaxSide / Math.max(sw, sh);
     const dw = Math.max(1, Math.floor(sw * scale));
     const dh = Math.max(1, Math.floor(sh * scale));
 
     workCanvas.width = dw;
     workCanvas.height = dh;
-
     workCtx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, dw, dh);
   }
 
   function grayscaleContrastBoost() {
-    // Simple grayscale + contrast boost that often helps on slightly blurry uploads
     const imgData = workCtx.getImageData(0, 0, workCanvas.width, workCanvas.height);
     const data = imgData.data;
 
-    // Contrast factor: 1.0 no change, higher increases contrast
     const factor = 1.7;
     const intercept = 128 * (1 - factor);
 
@@ -209,6 +206,7 @@
 
       data[i] = data[i + 1] = data[i + 2] = y2;
     }
+
     workCtx.putImageData(imgData, 0, 0);
   }
 
@@ -216,19 +214,18 @@
     const w = bitmap.width;
     const h = bitmap.height;
 
-    // Try several likely regions. Barcodes are often on the lower half.
+    // Heavily favor the lower portion where barcodes usually are
     const crops = [
       { sx: 0,       sy: 0,        sw: w,        sh: h },        // full
-      { sx: w*0.10,  sy: h*0.40,   sw: w*0.80,   sh: h*0.60 },   // lower
-      { sx: w*0.15,  sy: h*0.50,   sw: w*0.70,   sh: h*0.45 },   // lower tight
+      { sx: w*0.08,  sy: h*0.38,   sw: w*0.84,   sh: h*0.62 },   // lower
+      { sx: w*0.12,  sy: h*0.50,   sw: w*0.76,   sh: h*0.45 },   // lower tighter
+      { sx: w*0.18,  sy: h*0.58,   sw: w*0.64,   sh: h*0.35 },   // barcode + digits band
       { sx: w*0.15,  sy: h*0.15,   sw: w*0.70,   sh: h*0.70 },   // center
     ];
 
-    // Two passes: raw then contrast boosted
     for (const pass of ["raw", "boost"]) {
       for (const c of crops) {
-        drawCrop(bitmap, c.sx, c.sy, c.sw, c.sh, 1400);
-
+        drawCrop(bitmap, c.sx, c.sy, c.sw, c.sh, 1600);
         if (pass === "boost") grayscaleContrastBoost();
 
         const code = await detectOnCanvas();
@@ -237,6 +234,83 @@
     }
 
     return null;
+  }
+
+  // Check digit validation (helps OCR choose the right digits)
+  function isValidUpcA(code) {
+    if (!/^\d{12}$/.test(code)) return false;
+    const d = code.split("").map(Number);
+    let sumOdd = 0, sumEven = 0;
+    for (let i = 0; i < 11; i++) {
+      if ((i % 2) === 0) sumOdd += d[i];
+      else sumEven += d[i];
+    }
+    const check = (10 - ((sumOdd * 3 + sumEven) % 10)) % 10;
+    return check === d[11];
+  }
+
+  function isValidEan13(code) {
+    if (!/^\d{13}$/.test(code)) return false;
+    const d = code.split("").map(Number);
+    let sum = 0;
+    for (let i = 0; i < 12; i++) sum += d[i] * (i % 2 === 0 ? 1 : 3);
+    const check = (10 - (sum % 10)) % 10;
+    return check === d[12];
+  }
+
+  function looksValidBarcode(code) {
+    if (isValidUpcA(code)) return true;
+    if (isValidEan13(code)) return true;
+    if (/^\d{8}$/.test(code)) return true; // accept EAN-8 without check digit verification
+    return false;
+  }
+
+  async function ocrDigitsFromLowerRegion(bitmap) {
+    if (typeof Tesseract === "undefined") return "";
+
+    // Crop a band where the printed digits usually are
+    const w = bitmap.width;
+    const h = bitmap.height;
+
+    const sx = Math.floor(w * 0.08);
+    const sy = Math.floor(h * 0.58);
+    const sw = Math.floor(w * 0.84);
+    const sh = Math.floor(h * 0.32);
+
+    workCanvas.width = sw;
+    workCanvas.height = sh;
+    workCtx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+
+    // Binarize to help OCR
+    const imgData = workCtx.getImageData(0, 0, sw, sh);
+    const data = imgData.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const y = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      const v = y > 165 ? 255 : 0;
+      data[i] = data[i + 1] = data[i + 2] = v;
+    }
+    workCtx.putImageData(imgData, 0, 0);
+
+    // OCR digits only
+    const result = await Tesseract.recognize(workCanvas, "eng", {
+      tessedit_char_whitelist: "0123456789",
+    });
+
+    const text = (result && result.data && result.data.text) ? result.data.text : "";
+    const digits = text.replace(/\D+/g, "");
+    if (!digits) return "";
+
+    // Pull likely codes out of OCR stream
+    const candidates = [];
+    for (const len of [13, 12, 8]) {
+      for (let i = 0; i + len <= digits.length; i++) {
+        candidates.push(digits.slice(i, i + len));
+      }
+    }
+
+    // Prefer valid check digit
+    const valid = candidates.find(looksValidBarcode);
+    return valid || (candidates[0] || "");
   }
 
   async function scanVideoFrame() {
@@ -250,9 +324,7 @@
           .filter(Boolean)
           .sort((a, b) => b.length - a.length);
 
-        if (candidates.length) {
-          await handleFound(candidates[0]);
-        }
+        if (candidates.length) await handleFound(candidates[0]);
       }
     } catch {
       // ignore intermittent errors
@@ -286,7 +358,7 @@
     show(video);
     show(stopBtn);
 
-    // Give autofocus a moment before scanning starts
+    // Give autofocus a moment
     await new Promise(r => setTimeout(r, 350));
 
     setStatus("Scanning with camera...");
@@ -301,28 +373,31 @@
     const d = await ensureDetector();
     if (!d) return;
 
-    setStatus("Loading uploaded photo...");
-
-    // Show only the preview image (no canvas shown)
     const url = URL.createObjectURL(file);
     preview.src = url;
     show(preview);
     hide(video);
     hide(stopBtn);
 
+    setStatus("Loading uploaded photo...");
+
     try {
       const bitmap = await createImageBitmap(file);
 
-      setStatus("Scanning uploaded photo...");
+      setStatus("Scanning barcode bars...");
+      let code = await scanBitmapWithCrops(bitmap);
 
-      const code = await scanBitmapWithCrops(bitmap);
+      if (!code) {
+        setStatus("No barcode from bars. Reading printed digits...");
+        code = await ocrDigitsFromLowerRegion(bitmap);
+      }
 
       URL.revokeObjectURL(url);
 
       if (code) {
         await handleFound(code);
       } else {
-        setStatus("No barcode found. Try a closer, sharper photo with less glare, or crop tighter around the barcode.");
+        setStatus("No barcode found. Try a closer photo, less glare, or crop tighter around the barcode.");
       }
     } catch {
       URL.revokeObjectURL(url);
