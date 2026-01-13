@@ -53,7 +53,7 @@
 
 <script>
 (() => {
-  // Set this to your Custom GPT link (already in your repo, included here for completeness)
+  // Set this to your Custom GPT link
   const GPT_LINK = "https://chatgpt.com/g/g-69668ac831dc81918be724f6ba3eee8d-the-wonderful-chef";
 
   const AUTO_OPEN_GPT_AFTER_DETECT = true;
@@ -144,16 +144,29 @@
     window.open(GPT_LINK, "_blank", "noopener,noreferrer");
   }
 
+  // Convert UPC-A (12 digits) to EAN-13 by prepending 0
+  function normalizeToEan13(code) {
+    if (!code || !/^\d+$/.test(code)) return code;
+    
+    if (code.length === 12 && isValidUpcA(code)) {
+      return "0" + code; // UPC-A to EAN-13
+    }
+    return code;
+  }
+
   async function handleFound(rawValue) {
     const digits = normalizeDigits(rawValue);
     if (!digits) return;
 
-    lastCode = digits;
-    codeEl.textContent = digits;
+    // Normalize UPC-A to EAN-13 format
+    const normalized = normalizeToEan13(digits);
+    
+    lastCode = normalized;
+    codeEl.textContent = normalized;
 
     if (navigator.vibrate) navigator.vibrate(80);
 
-    const copied = await copyToClipboard(digits);
+    const copied = await copyToClipboard(normalized);
     if (copied) setStatus("Found and copied. Opening your GPT...");
     else setStatus("Found barcode. Copy may be blocked. Opening your GPT...");
 
@@ -214,13 +227,15 @@
     const w = bitmap.width;
     const h = bitmap.height;
 
-    // Heavily favor the lower portion where barcodes usually are
+    // More diverse crop regions to handle various image compositions
     const crops = [
       { sx: 0,       sy: 0,        sw: w,        sh: h },        // full
-      { sx: w*0.08,  sy: h*0.38,   sw: w*0.84,   sh: h*0.62 },   // lower
+      { sx: w*0.08,  sy: h*0.38,   sw: w*0.84,   sh: h*0.62 },   // lower half
       { sx: w*0.12,  sy: h*0.50,   sw: w*0.76,   sh: h*0.45 },   // lower tighter
       { sx: w*0.18,  sy: h*0.58,   sw: w*0.64,   sh: h*0.35 },   // barcode + digits band
       { sx: w*0.15,  sy: h*0.15,   sw: w*0.70,   sh: h*0.70 },   // center
+      { sx: w*0.10,  sy: h*0.25,   sw: w*0.80,   sh: h*0.50 },   // middle band
+      { sx: w*0.20,  sy: h*0.30,   sw: w*0.60,   sh: h*0.40 },   // tight center
     ];
 
     for (const pass of ["raw", "boost"]) {
@@ -229,14 +244,14 @@
         if (pass === "boost") grayscaleContrastBoost();
 
         const code = await detectOnCanvas();
-        if (code) return code;
+        if (code && looksValidBarcode(code)) return code;
       }
     }
 
     return null;
   }
 
-  // Check digit validation (helps OCR choose the right digits)
+  // Check digit validation
   function isValidUpcA(code) {
     if (!/^\d{12}$/.test(code)) return false;
     const d = code.split("").map(Number);
@@ -258,35 +273,56 @@
     return check === d[12];
   }
 
+  function isValidEan8(code) {
+    if (!/^\d{8}$/.test(code)) return false;
+    const d = code.split("").map(Number);
+    let sum = 0;
+    for (let i = 0; i < 7; i++) sum += d[i] * (i % 2 === 0 ? 3 : 1);
+    const check = (10 - (sum % 10)) % 10;
+    return check === d[7];
+  }
+
   function looksValidBarcode(code) {
+    if (!code || !/^\d+$/.test(code)) return false;
     if (isValidUpcA(code)) return true;
     if (isValidEan13(code)) return true;
-    if (/^\d{8}$/.test(code)) return true; // accept EAN-8 without check digit verification
+    if (isValidEan8(code)) return true;
     return false;
   }
 
-  async function ocrDigitsFromLowerRegion(bitmap) {
+  async function ocrDigitsFromRegion(bitmap, sy_factor, sh_factor) {
     if (typeof Tesseract === "undefined") return "";
 
-    // Crop a band where the printed digits usually are
     const w = bitmap.width;
     const h = bitmap.height;
 
-    const sx = Math.floor(w * 0.08);
-    const sy = Math.floor(h * 0.58);
-    const sw = Math.floor(w * 0.84);
-    const sh = Math.floor(h * 0.32);
+    const sx = Math.floor(w * 0.05);
+    const sy = Math.floor(h * sy_factor);
+    const sw = Math.floor(w * 0.90);
+    const sh = Math.floor(h * sh_factor);
 
     workCanvas.width = sw;
     workCanvas.height = sh;
     workCtx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
 
-    // Binarize to help OCR
+    // Adaptive binarization - try multiple thresholds
     const imgData = workCtx.getImageData(0, 0, sw, sh);
     const data = imgData.data;
+    
+    // Calculate average brightness
+    let totalBrightness = 0;
     for (let i = 0; i < data.length; i += 4) {
       const y = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
-      const v = y > 165 ? 255 : 0;
+      totalBrightness += y;
+    }
+    const avgBrightness = totalBrightness / (data.length / 4);
+    
+    // Use adaptive threshold based on image brightness
+    const threshold = avgBrightness > 180 ? 180 : (avgBrightness > 140 ? 150 : 120);
+    
+    for (let i = 0; i < data.length; i += 4) {
+      const y = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      const v = y > threshold ? 255 : 0;
       data[i] = data[i + 1] = data[i + 2] = v;
     }
     workCtx.putImageData(imgData, 0, 0);
@@ -297,20 +333,45 @@
     });
 
     const text = (result && result.data && result.data.text) ? result.data.text : "";
-    const digits = text.replace(/\D+/g, "");
-    if (!digits) return "";
+    return text.replace(/\D+/g, "");
+  }
 
-    // Pull likely codes out of OCR stream
-    const candidates = [];
-    for (const len of [13, 12, 8]) {
-      for (let i = 0; i + len <= digits.length; i++) {
-        candidates.push(digits.slice(i, i + len));
+  async function ocrMultipleRegions(bitmap) {
+    // Try OCR on multiple regions: lower third, middle, upper
+    const regions = [
+      { name: "lower", sy: 0.58, sh: 0.32 },
+      { name: "middle", sy: 0.35, sh: 0.35 },
+      { name: "upper", sy: 0.15, sh: 0.30 },
+    ];
+
+    for (const region of regions) {
+      const digits = await ocrDigitsFromRegion(bitmap, region.sy, region.sh);
+      if (!digits) continue;
+
+      // Extract potential barcodes from the digit stream
+      const candidates = [];
+      
+      // Try EAN-13
+      for (let i = 0; i + 13 <= digits.length; i++) {
+        candidates.push(digits.slice(i, i + 13));
       }
+      
+      // Try UPC-A
+      for (let i = 0; i + 12 <= digits.length; i++) {
+        candidates.push(digits.slice(i, i + 12));
+      }
+      
+      // Try EAN-8
+      for (let i = 0; i + 8 <= digits.length; i++) {
+        candidates.push(digits.slice(i, i + 8));
+      }
+
+      // Find first valid barcode
+      const valid = candidates.find(looksValidBarcode);
+      if (valid) return valid;
     }
 
-    // Prefer valid check digit
-    const valid = candidates.find(looksValidBarcode);
-    return valid || (candidates[0] || "");
+    return "";
   }
 
   async function scanVideoFrame() {
@@ -321,7 +382,7 @@
       if (results && results.length) {
         const candidates = results
           .map(r => normalizeDigits(r.rawValue))
-          .filter(Boolean)
+          .filter(looksValidBarcode)
           .sort((a, b) => b.length - a.length);
 
         if (candidates.length) await handleFound(candidates[0]);
@@ -387,9 +448,15 @@
       setStatus("Scanning barcode bars...");
       let code = await scanBitmapWithCrops(bitmap);
 
+      // CRITICAL FIX: Only accept valid barcodes from bar scanning
+      if (code && !looksValidBarcode(code)) {
+        console.log("Rejected invalid bar-scan result:", code);
+        code = null;
+      }
+
       if (!code) {
-        setStatus("No barcode from bars. Reading printed digits...");
-        code = await ocrDigitsFromLowerRegion(bitmap);
+        setStatus("No valid barcode from bars. Reading printed digits with OCR...");
+        code = await ocrMultipleRegions(bitmap);
       }
 
       URL.revokeObjectURL(url);
@@ -399,8 +466,9 @@
       } else {
         setStatus("No barcode found. Try a closer photo, less glare, or crop tighter around the barcode.");
       }
-    } catch {
+    } catch (err) {
       URL.revokeObjectURL(url);
+      console.error("Scan error:", err);
       setStatus("Could not scan that image. Try another photo or use camera scan.");
     }
   }
